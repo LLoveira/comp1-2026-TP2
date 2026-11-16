@@ -213,15 +213,28 @@ static Expr *parse_seq(Parser *p)
  */
 static Expr *parse_expr(Parser *p)
 {
-    static int avisado = 0;
-    int l = p->tok.linha, c = p->tok.coluna;
-    if (!avisado) {
-        diag_aviso(l, c, "parse_expr ainda nao implementado: regras lidas como vazias");
-        avisado = 1;
-    }
-    while (p->tok.tipo != MT_PV && p->tok.tipo != MT_FIM)
+    int l, c;
+    Expr *resultado;
+    Expr *alternativa;
+
+    l = p->tok.linha;
+    c = p->tok.coluna;
+
+    resultado = parse_seq(p);
+
+    if (p->tok.tipo != MT_BARRA)
+        return resultado;
+
+    alternativa = expr_criar(E_ALT, l, c);
+    expr_adicionar(alternativa, resultado);
+
+    while (p->tok.tipo == MT_BARRA) {
         avancar(p);
-    return expr_criar(E_VAZIO, l, c);
+        resultado = parse_seq(p);
+        expr_adicionar(alternativa, resultado);
+    }
+
+    return alternativa;
 }
 
 /* ------------------------------------------------------------------ */
