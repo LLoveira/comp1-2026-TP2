@@ -84,7 +84,65 @@ static void sincronizar(Parser *p)
 
 static Expr *parse_expr(Parser *p);
 
+static Expr *parse_fator(Parser *p)
+{
+    int l, c, i;
+    Expr *filho;
 
+    l = p->tok.linha;
+    c = p->tok.coluna;
+
+    switch (p->tok.tipo) {
+
+        case MT_NOME_TERM:
+            i = gram_terminal(p->g, p->tok.texto, 0, l, c);
+            avancar(p);
+            return expr_simbolo(E_TERM, i, l, c);
+
+        case MT_LITERAL:
+            i = gram_terminal(p->g, p->tok.texto, 1, l, c);
+            avancar(p);
+            return expr_simbolo(E_TERM, i, l, c);
+
+        case MT_NAOTERM:
+            i = gram_naoterminal(p->g, p->tok.texto, l, c);
+            avancar(p);
+            return expr_simbolo(E_NAOTERM, i, l, c);
+
+        case MT_ABRE_PAR:
+            avancar(p);
+            filho = parse_expr(p);
+            esperar(p, MT_FECHA_PAR);
+            return filho;
+
+        case MT_ABRE_COL:
+            avancar(p);
+            filho = parse_expr(p);
+            esperar(p, MT_FECHA_COL);
+            return expr_unario(E_OPC, filho, l, c);
+
+        case MT_ABRE_CHAVE:
+            avancar(p);
+            filho = parse_expr(p);
+            esperar(p, MT_FECHA_CHAVE);
+            return expr_unario(E_REP, filho, l, c);
+
+        default:
+            erro_encontrado(p, "fator EBNF");
+
+            if (p->tok.tipo != MT_PV &&
+                p->tok.tipo != MT_FIM &&
+                p->tok.tipo != MT_RULES &&
+                p->tok.tipo != MT_BARRA &&
+                p->tok.tipo != MT_FECHA_PAR &&
+                p->tok.tipo != MT_FECHA_COL &&
+                p->tok.tipo != MT_FECHA_CHAVE) {
+                avancar(p);
+            }
+
+            return expr_criar(E_VAZIO, l, c);
+    }
+}
 
 /*
  * TODO(aluno): implementar as funcoes abaixo seguindo a gramatica da
