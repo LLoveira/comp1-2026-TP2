@@ -144,6 +144,50 @@ static Expr *parse_fator(Parser *p)
     }
 }
 
+static Expr *parse_seq(Parser *p)
+{
+    int l, c, quantidade;
+    Expr *resultado, *fator;
+
+    l = p->tok.linha;
+    c = p->tok.coluna;
+
+    quantidade = 0;
+    resultado = NULL;
+
+    while (p->tok.tipo == MT_NOME_TERM ||
+           p->tok.tipo == MT_LITERAL ||
+           p->tok.tipo == MT_NAOTERM ||
+           p->tok.tipo == MT_ABRE_PAR ||
+           p->tok.tipo == MT_ABRE_COL ||
+           p->tok.tipo == MT_ABRE_CHAVE) {
+
+        fator = parse_fator(p);
+
+        if (quantidade == 0) {
+            resultado = fator;
+        }
+        else if (quantidade == 1) {
+            Expr *sequencia;
+
+            sequencia = expr_criar(E_SEQ, l, c);
+            expr_adicionar(sequencia, resultado);
+            expr_adicionar(sequencia, fator);
+            resultado = sequencia;
+        }
+        else {
+            expr_adicionar(resultado, fator);
+        }
+
+        quantidade++;
+    }
+
+    if (quantidade == 0)
+        return expr_criar(E_VAZIO, l, c);
+
+    return resultado;
+}
+
 /*
  * TODO(aluno): implementar as funcoes abaixo seguindo a gramatica da
  * notacao (cabecalho deste arquivo), uma funcao por nao terminal:
