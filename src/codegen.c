@@ -1327,9 +1327,11 @@ static int gen_casamento_regex(
  *
  * Ao chegar ao fim do arquivo devolve um token TOKEN_FIM. */
 
-static void gen_token_de_arquivo(FILE *f, int microc)
+ static void gen_token_de_arquivo(FILE *f, int microc, int nterms)
 {
-    static const char *const inicio[] = {
+    
+    static const char *const inicio[] =
+    {
         "static Token token_de_arquivo(void)",
         "{",
         "    Token t;",
@@ -1338,19 +1340,25 @@ static void gen_token_de_arquivo(FILE *f, int microc)
         "    char *p;",
         "    char *abre;",
         "    char *fecha;",
+        "    char *fim;",
         "    int tipo;",
+        "    int tipo_maximo = TIPO_MAXIMO_TOKEN;",
         "    int linha;",
         "    int numero_linha = 0;",
         "    int lidos;",
+        "    int posicao;",
         "    memset(&t, 0, sizeof t);",
         "    while (fgets(buffer, sizeof buffer, arquivo_tokens) != NULL) {",
         "        numero_linha++;",
         "        p = buffer;",
         "        while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n')",
         "            p++;",
-        "        if (*p == '\\0')",
-        "            continue;",
-        "        abre = strstr(p, \"lexema = '\");",
+        "        if (*p == '\\0') continue;",
+        "        posicao = 0;",
+        "        abre = p + posicao;",
+        "        while (*abre == ' ' || *abre == '\\t')",
+        "            abre++;",
+        "        if (strncmp(abre, \"lexema = '\", strlen(\"lexema = '\")) != 0) goto erro_token;",
         "        if (abre == NULL) goto erro_token;",
         "        abre += strlen(\"lexema = '\");",
         "        fecha = strchr(abre, '\\'');",
@@ -1359,14 +1367,21 @@ static void gen_token_de_arquivo(FILE *f, int microc)
         "        memcpy(lexema, abre, (size_t)(fecha - abre));",
         "        lexema[fecha - abre] = '\\0';",
         "        lidos = sscanf(p, \"Token: tipo = %d,\", &tipo);",
-        "        if (lidos != 1) goto erro_token;",
-        "        lidos = sscanf(fecha + 1, \", linha = %d\", &linha);",
-        "        if (lidos != 1) goto erro_token;",
+        "        if (lidos != 1 || tipo < 0 || tipo > tipo_maximo) goto erro_token;",
+        "        posicao = 0;",
+        "        lidos = sscanf(fecha + 1, \", linha = %d%n\", &linha, &posicao);",
+        "        if (lidos != 1 || linha < 1) goto erro_token;",
+        "        if (posicao == 0) goto erro_token;",
+        "        fim = fecha + 1 + posicao;",
+        "        while (*fim == ' ' || *fim == '\\t' || *fim == '\\r' || *fim == '\\n')",
+        "            fim++;",
+        "        if (*fim != '\\0') goto erro_token;",
         "        t.tipo = tipo;",
         "        strcpy(t.lexema, lexema);",
         "        t.linha = linha;",
         NULL
     };
+
     static const char *const final_normal[] = {
         "        t.coluna = 0;",
         "        return t;",
@@ -1393,8 +1408,10 @@ static void gen_token_de_arquivo(FILE *f, int microc)
         NULL
     };
 
-    emit_linhas(f, inicio);
-    emit_linhas(f, microc ? final_microc : final_normal);
+    fprintf(f, "#define TIPO_MAXIMO_TOKEN %d\n\n",
+        microc ? 36 : nterms - 1);
+emit_linhas(f, inicio);
+emit_linhas(f, microc ? final_microc : final_normal);
 }
 
 
@@ -1839,7 +1856,7 @@ static int gerar_c(const Gramatica *g, const OpcoesGeracao *op)
     gerar_nome_token(f, g);
     gerar_posicao_e_avancar(f, op->microc);
     emit_linhas(f, rt_primitivas);
-    gen_token_de_arquivo(f, op->microc);
+    gen_token_de_arquivo(f, op->microc, g->nterms);
 
     rewind(corpo);
     while ((c = fgetc(corpo)) != EOF)
