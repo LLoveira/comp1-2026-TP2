@@ -40,6 +40,906 @@ typedef struct {
     int nivel;          /* nivel de indentacao (4 espacos por nivel) */
 } Emissor;
 
+#define AFN_EPSILON (-1)
+
+typedef struct {
+    int origem;
+    int destino;
+    int epsilon;
+    unsigned char caracteres[32];
+} TransicaoAFN;
+
+typedef struct {
+    TransicaoAFN *transicoes;
+    int ntransicoes;
+    int captransicoes;
+    int nestados;
+    int inicial;
+    int final;
+} AutomatoAFN;
+
+typedef struct {
+    int inicial;
+    int final;
+} FragmentoAFN;
+
+/* Prototipos das operacoes sobre fragmentos do AFN. */
+static FragmentoAFN afn_fragmento_epsilon(
+    AutomatoAFN *a);
+
+static FragmentoAFN afn_concatenar(
+    AutomatoAFN *a,
+    FragmentoAFN primeiro,
+    FragmentoAFN segundo);
+
+static FragmentoAFN afn_alternar(
+    AutomatoAFN *a,
+    FragmentoAFN primeiro,
+    FragmentoAFN segundo);
+
+static FragmentoAFN afn_repetir(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento);
+
+static FragmentoAFN afn_mais(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento);
+
+static FragmentoAFN afn_opcional(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento);
+
+typedef struct {
+    const char *texto;
+    size_t posicao;
+    AutomatoAFN *automato;
+    int erro;
+} ParserRegex;
+
+/* Le um caractere, interpretando sequencias de escape. */
+static int regex_ler_escapado(ParserRegex *p)
+{
+    int c;
+
+    c = (unsigned char)p->texto[p->posicao];
+
+    if (c == '\0') {
+        p->erro = 1;
+        return 0;
+    }
+
+    p->posicao++;
+
+    if (c != '\\') {
+        return c;
+    }
+
+    c = (unsigned char)p->texto[p->posicao];
+
+    if (c == '\0') {
+        p->erro = 1;
+        return 0;
+    }
+
+    p->posicao++;
+
+    switch (c) {
+    case 'n':
+        return '\n';
+
+    case 'r':
+        return '\r';
+
+    case 't':
+        return '\t';
+
+    case '0':
+        return '\0';
+
+    default:
+        return c;
+    }
+}
+
+/* Verifica se chegamos ao final da expressao regular. */
+static int regex_fim(const ParserRegex *p)
+{
+    return p->texto[p->posicao] == '\0';
+}
+
+/* Inicializa um automato vazio. */
+static void afn_iniciar(AutomatoAFN *a)
+{
+    a->transicoes = NULL;
+    a->ntransicoes = 0;
+    a->captransicoes = 0;
+    a->nestados = 0;
+    a->inicial = -1;
+    a->final = -1;
+}
+
+/* Cria um estado e retorna seu identificador. */
+static int afn_novo_estado(AutomatoAFN *a)
+{
+    int estado;
+
+    estado = a->nestados;
+    a->nestados++;
+
+    return estado;
+}
+
+/* Adiciona uma transicao ao automato. */
+static void afn_adicionar_transicao(
+    AutomatoAFN *a,
+    int origem,
+    int destino,
+    int epsilon,
+    const unsigned char caracteres[32])
+{
+    TransicaoAFN *novo;
+    int nova_capacidade;
+
+    if (a->ntransicoes == a->captransicoes) {
+        nova_capacidade = (a->captransicoes == 0)
+                        ? 16 : a->captransicoes * 2;
+
+        novo = (TransicaoAFN *) realloc(
+            a->transicoes,
+            nova_capacidade * sizeof(TransicaoAFN));
+
+        if (novo == NULL) {
+            fprintf(stderr,
+                    "memoria insuficiente ao construir AFN\n");
+            exit(EXIT_FAILURE);
+        }
+
+        a->transicoes = novo;
+        a->captransicoes = nova_capacidade;
+    }
+
+    a->transicoes[a->ntransicoes].origem = origem;
+    a->transicoes[a->ntransicoes].destino = destino;
+    a->transicoes[a->ntransicoes].epsilon = epsilon;
+
+    if (caracteres != NULL) {
+        memcpy(
+            a->transicoes[a->ntransicoes].caracteres,
+            caracteres,
+            32);
+    } else {
+        memset(
+            a->transicoes[a->ntransicoes].caracteres,
+            0,
+            32);
+    }
+
+    a->ntransicoes++;
+}
+
+/* Limpa um conjunto de caracteres. */
+static void afn_limpar_conjunto(unsigned char caracteres[32])
+{
+    memset(caracteres, 0, 32);
+}
+
+/* Adiciona um caractere ao conjunto. */
+static void afn_adicionar_caractere(
+    unsigned char caracteres[32],
+    unsigned char c)
+{
+    caracteres[c / 8] |= (unsigned char)(1U << (c % 8));
+}
+
+/* Adiciona um intervalo de caracteres ao conjunto. */
+static void afn_adicionar_intervalo(
+    unsigned char caracteres[32],
+    unsigned char inicio,
+    unsigned char fim)
+{
+    int c;
+
+    for (c = (int)inicio; c <= (int)fim; c++) {
+        afn_adicionar_caractere(caracteres, (unsigned char)c);
+    }
+}
+
+/* Inverte todos os bits do conjunto de caracteres. */
+static void afn_negar_conjunto(unsigned char caracteres[32])
+{
+    int i;
+
+    for (i = 0; i < 32; i++) {
+        caracteres[i] = (unsigned char)~caracteres[i];
+    }
+}
+
+/* Libera a memoria utilizada pelo automato. */
+static void afn_liberar(AutomatoAFN *a)
+{
+    free(a->transicoes);
+
+    a->transicoes = NULL;
+    a->ntransicoes = 0;
+    a->captransicoes = 0;
+    a->nestados = 0;
+    a->inicial = -1;
+    a->final = -1;
+}
+
+
+/* Cria um fragmento que reconhece um unico caractere. */
+static FragmentoAFN afn_fragmento_caractere(
+    AutomatoAFN *a,
+    int simbolo)
+{
+    FragmentoAFN f;
+    unsigned char caracteres[32];
+
+    afn_limpar_conjunto(caracteres);
+    afn_adicionar_caractere(
+        caracteres,
+        (unsigned char)simbolo);
+
+    f.inicial = afn_novo_estado(a);
+    f.final = afn_novo_estado(a);
+
+    afn_adicionar_transicao(
+        a,
+        f.inicial,
+        f.final,
+        0,
+        caracteres);
+
+    return f;
+}
+
+/* Cria um fragmento que reconhece qualquer caractere do conjunto. */
+static FragmentoAFN afn_fragmento_conjunto(
+    AutomatoAFN *a,
+    const unsigned char caracteres[32])
+{
+    FragmentoAFN f;
+
+    f.inicial = afn_novo_estado(a);
+    f.final = afn_novo_estado(a);
+
+    afn_adicionar_transicao(
+        a,
+        f.inicial,
+        f.final,
+        0,
+        caracteres);
+
+    return f;
+}
+
+static FragmentoAFN regex_parse_expr(ParserRegex *p);
+
+static FragmentoAFN regex_parse_classe(ParserRegex *p)
+{
+    unsigned char caracteres[32];
+    int negada;
+    int atual;
+    int proximo;
+
+    afn_limpar_conjunto(caracteres);
+
+    /* Verifica se a classe e negada. */
+    negada = 0;
+
+    if (p->texto[p->posicao] == '^') {
+        negada = 1;
+        p->posicao++;
+    }
+
+    while (!regex_fim(p) && p->texto[p->posicao] != ']') {
+        atual = regex_ler_escapado(p);
+
+        if (p->erro) {
+            break;
+        }
+
+        /* Verifica se existe um intervalo, como a-z. */
+        if (p->texto[p->posicao] == '-'
+            && p->texto[p->posicao + 1] != ']'
+            && p->texto[p->posicao + 1] != '\0') {
+
+            p->posicao++;
+            proximo = regex_ler_escapado(p);
+
+            if (p->erro || proximo < atual) {
+                p->erro = 1;
+                break;
+            }
+
+            afn_adicionar_intervalo(
+                caracteres,
+                (unsigned char)atual,
+                (unsigned char)proximo);
+        } else {
+            afn_adicionar_caractere(
+                caracteres,
+                (unsigned char)atual);
+        }
+    }
+
+    /* A classe precisa terminar com ]. */
+    if (regex_fim(p) || p->texto[p->posicao] != ']') {
+        p->erro = 1;
+    } else {
+        p->posicao++;
+    }
+
+    if (negada) {
+        afn_negar_conjunto(caracteres);
+    }
+
+    return afn_fragmento_conjunto(p->automato, caracteres);
+}
+
+/* Analisa um atomo da expressao regular. */
+static FragmentoAFN regex_parse_atomo(ParserRegex *p)
+{
+    FragmentoAFN resultado;
+    unsigned char caracteres[32];
+    int c;
+
+    if (regex_fim(p)) {
+        p->erro = 1;
+        return afn_fragmento_epsilon(p->automato);
+    }
+
+    c = (unsigned char)p->texto[p->posicao];
+
+    /* Agrupamento entre parenteses. */
+    if (c == '(') {
+        p->posicao++;
+
+        resultado = regex_parse_expr(p);
+
+        if (p->texto[p->posicao] != ')') {
+            p->erro = 1;
+        } else {
+            p->posicao++;
+        }
+
+        return resultado;
+    }
+
+    /* Classe de caracteres. */
+    if (c == '[') {
+        p->posicao++;
+        return regex_parse_classe(p);
+    }
+
+    /* Ponto: qualquer caractere, exceto quebra de linha. */
+    if (c == '.') {
+        p->posicao++;
+
+        afn_limpar_conjunto(caracteres);
+
+        afn_adicionar_intervalo(caracteres, 1, 255);
+        caracteres[(unsigned char)'\n' / 8] &=
+            (unsigned char)~(1U << ((unsigned char)'\n' % 8));
+        caracteres[(unsigned char)'\r' / 8] &=
+            (unsigned char)~(1U << ((unsigned char)'\r' % 8));
+
+        return afn_fragmento_conjunto(
+            p->automato,
+            caracteres);
+    }
+
+    /* Caractere literal ou sequencia de escape. */
+    c = regex_ler_escapado(p);
+
+    if (p->erro) {
+        return afn_fragmento_epsilon(p->automato);
+    }
+
+    return afn_fragmento_caractere(p->automato, c);
+}
+
+/* Analisa um atomo seguido de um operador de repeticao opcional. */
+static FragmentoAFN regex_parse_fator(ParserRegex *p)
+{
+    FragmentoAFN resultado;
+    int operador;
+
+    resultado = regex_parse_atomo(p);
+
+    if (p->erro || regex_fim(p)) {
+        return resultado;
+    }
+
+    operador = (unsigned char)p->texto[p->posicao];
+
+    switch (operador) {
+    case '*':
+        p->posicao++;
+        resultado = afn_repetir(p->automato, resultado);
+        break;
+
+    case '+':
+        p->posicao++;
+        resultado = afn_mais(p->automato, resultado);
+        break;
+
+    case '?':
+        p->posicao++;
+        resultado = afn_opcional(p->automato, resultado);
+        break;
+
+    default:
+        break;
+    }
+
+    return resultado;
+}
+
+/* Analisa uma sequencia de fatores concatenados. */
+static FragmentoAFN regex_parse_seq(ParserRegex *p)
+{
+    FragmentoAFN resultado;
+    FragmentoAFN proximo;
+    int c;
+    int primeiro;
+
+    primeiro = 1;
+
+    while (!regex_fim(p)) {
+        c = (unsigned char)p->texto[p->posicao];
+
+        /* Estes caracteres encerram a sequencia atual. */
+        if (c == '|' || c == ')') {
+            break;
+        }
+
+        proximo = regex_parse_fator(p);
+
+        if (p->erro) {
+            break;
+        }
+
+        if (primeiro) {
+            resultado = proximo;
+            primeiro = 0;
+        } else {
+            resultado = afn_concatenar(
+                p->automato,
+                resultado,
+                proximo);
+        }
+    }
+
+    /* Uma sequencia vazia representa epsilon. */
+    if (primeiro) {
+        resultado = afn_fragmento_epsilon(p->automato);
+    }
+
+    return resultado;
+}
+
+/* Analisa expressoes com alternancia (|). */
+static FragmentoAFN regex_parse_expr(ParserRegex *p)
+{
+    FragmentoAFN resultado;
+    FragmentoAFN proximo;
+
+    resultado = regex_parse_seq(p);
+
+    while (!regex_fim(p) &&
+           p->texto[p->posicao] == '|') {
+        p->posicao++;
+
+        proximo = regex_parse_seq(p);
+
+        if (p->erro) {
+            break;
+        }
+
+        resultado = afn_alternar(
+            p->automato,
+            resultado,
+            proximo);
+    }
+
+    return resultado;
+}
+
+/* Emite a tabela de transicoes do AFN como um vetor C. */
+static void afn_emitir_transicoes(
+    FILE *f,
+    const AutomatoAFN *a)
+{
+    int i;
+    int j;
+
+    fputs("    static const int trans_origem[] = {\n", f);
+
+    for (i = 0; i < a->ntransicoes; i++) {
+        fprintf(f, "        %d%s\n",
+            a->transicoes[i].origem,
+            i + 1 < a->ntransicoes ? "," : "");
+    }
+
+    fputs("    };\n", f);
+
+    fputs("    static const int trans_destino[] = {\n", f);
+
+    for (i = 0; i < a->ntransicoes; i++) {
+        fprintf(f, "        %d%s\n",
+            a->transicoes[i].destino,
+            i + 1 < a->ntransicoes ? "," : "");
+    }
+
+    fputs("    };\n", f);
+
+    fputs("    static const int trans_epsilon[] = {\n", f);
+
+    for (i = 0; i < a->ntransicoes; i++) {
+        fprintf(f, "        %d%s\n",
+            a->transicoes[i].epsilon,
+            i + 1 < a->ntransicoes ? "," : "");
+    }
+
+    fputs("    };\n", f);
+
+    fputs("    static const unsigned char trans_chars[][32] = {\n", f);
+
+    for (i = 0; i < a->ntransicoes; i++) {
+        fputs("        {", f);
+
+        for (j = 0; j < 32; j++) {
+            fprintf(f, "%u%s",
+                (unsigned int)a->transicoes[i].caracteres[j],
+                j < 31 ? ", " : "");
+        }
+
+        fprintf(f, "}%s\n",
+            i + 1 < a->ntransicoes ? "," : "");
+    }
+
+    fputs("    };\n", f);
+}
+
+/* Emite o simulador do AFN como codigo C. */
+static void afn_emitir_simulador(
+    FILE *f,
+    const AutomatoAFN *a)
+{
+    fprintf(f,
+        "    unsigned char ativos[%d];\n"
+        "    unsigned char proximos[%d];\n"
+        "    int pilha[%d];\n"
+        "    int topo;\n"
+        "    int estado;\n"
+        "    int i;\n"
+        "    int posicao;\n"
+        "    size_t melhor;\n"
+        "    unsigned int caractere;\n\n",
+        a->nestados,
+        a->nestados,
+        a->nestados);
+
+    fprintf(f,
+        "    memset(ativos, 0, sizeof ativos);\n"
+        "    ativos[%d] = 1;\n"
+        "    topo = 0;\n"
+        "    pilha[topo++] = %d;\n\n",
+        a->inicial,
+        a->inicial);
+
+    fputs(
+        "    while (topo > 0) {\n"
+        "        estado = pilha[--topo];\n"
+        "        for (i = 0; i < ",
+        f);
+
+    fprintf(f, "%d; i++) {\n", a->ntransicoes);
+
+    fputs(
+        "            if (trans_epsilon[i] &&\n"
+        "                trans_origem[i] == estado &&\n"
+        "                !ativos[trans_destino[i]]) {\n"
+        "                ativos[trans_destino[i]] = 1;\n"
+        "                pilha[topo++] = trans_destino[i];\n"
+        "            }\n"
+        "        }\n"
+        "    }\n\n"
+        "    melhor = ativos[",
+        f);
+
+    fprintf(f, "%d] ? 0U : 0U;\n", a->final);
+
+    fputs(
+        "    posicao = 0;\n"
+        "    while (s[posicao] != '\\0') {\n"
+        "        caractere = (unsigned char)s[posicao];\n"
+        "        memset(proximos, 0, sizeof proximos);\n"
+        "        for (estado = 0; estado < ",
+        f);
+
+    fprintf(f, "%d; estado++) {\n", a->nestados);
+
+    fputs(
+        "            if (!ativos[estado]) {\n"
+        "                continue;\n"
+        "            }\n"
+        "            for (i = 0; i < ",
+        f);
+
+    fprintf(f, "%d; i++) {\n", a->ntransicoes);
+
+    fputs(
+        "                if (!trans_epsilon[i] &&\n"
+        "                    trans_origem[i] == estado &&\n"
+        "                    (trans_chars[i][caractere / 8U] &\n"
+        "                     (1U << (caractere % 8U)))) {\n"
+        "                    proximos[trans_destino[i]] = 1;\n"
+        "                }\n"
+        "            }\n"
+        "        }\n\n"
+        "        memcpy(ativos, proximos, sizeof ativos);\n"
+        "        topo = 0;\n"
+        "        for (estado = 0; estado < ",
+        f);
+
+    fprintf(f, "%d; estado++) {\n", a->nestados);
+
+    fputs(
+        "            if (ativos[estado]) {\n"
+        "                pilha[topo++] = estado;\n"
+        "            }\n"
+        "        }\n\n"
+        "        while (topo > 0) {\n"
+        "            estado = pilha[--topo];\n"
+        "            for (i = 0; i < ",
+        f);
+
+    fprintf(f, "%d; i++) {\n", a->ntransicoes);
+
+    fputs(
+        "                if (trans_epsilon[i] &&\n"
+        "                    trans_origem[i] == estado &&\n"
+        "                    !ativos[trans_destino[i]]) {\n"
+        "                    ativos[trans_destino[i]] = 1;\n"
+        "                    pilha[topo++] = trans_destino[i];\n"
+        "                }\n"
+        "            }\n"
+        "        }\n\n"
+        "        posicao++;\n"
+        "        if (ativos[",
+        f);
+
+    fprintf(f, "%d]) {\n", a->final);
+
+    fputs(
+        "            melhor = (size_t)posicao;\n"
+        "        }\n"
+        "        {\n"
+        "            int algum;\n"
+        "            algum = 0;\n"
+        "            for (estado = 0; estado < ",
+        f);
+
+    fprintf(f, "%d; estado++) {\n", a->nestados);
+
+    fputs(
+        "                if (ativos[estado]) {\n"
+        "                    algum = 1;\n"
+        "                    break;\n"
+        "                }\n"
+        "            }\n"
+        "            if (!algum) {\n"
+        "                break;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n\n"
+        "    return melhor;\n",
+        f);
+}
+
+/* Cria um fragmento que reconhece a cadeia vazia. */
+static FragmentoAFN afn_fragmento_epsilon(AutomatoAFN *a)
+{
+    FragmentoAFN f;
+
+    f.inicial = afn_novo_estado(a);
+    f.final = afn_novo_estado(a);
+
+    afn_adicionar_transicao(
+        a,
+        f.inicial,
+        f.final,
+        1,
+        NULL);
+
+    return f;
+}
+
+
+/* Concatena dois fragmentos do mesmo automato. */
+static FragmentoAFN afn_concatenar(
+    AutomatoAFN *a,
+    FragmentoAFN primeiro,
+    FragmentoAFN segundo)
+{
+    FragmentoAFN resultado;
+
+    afn_adicionar_transicao(
+        a,
+        primeiro.final,
+        segundo.inicial,
+        1,
+        NULL);
+
+    resultado.inicial = primeiro.inicial;
+    resultado.final = segundo.final;
+
+    return resultado;
+}
+
+
+/* Combina dois fragmentos por alternancia (operador |). */
+static FragmentoAFN afn_alternar(
+    AutomatoAFN *a,
+    FragmentoAFN primeiro,
+    FragmentoAFN segundo)
+{
+    FragmentoAFN resultado;
+
+    resultado.inicial = afn_novo_estado(a);
+    resultado.final = afn_novo_estado(a);
+
+    /* O novo inicio pode escolher qualquer fragmento. */
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        primeiro.inicial,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        segundo.inicial,
+        1,
+        NULL);
+
+    /* Os dois fragmentos chegam ao mesmo final. */
+    afn_adicionar_transicao(
+        a,
+        primeiro.final,
+        resultado.final,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        segundo.final,
+        resultado.final,
+        1,
+        NULL);
+
+    return resultado;
+}
+
+/* Permite zero ou mais repeticoes de um fragmento (*). */
+static FragmentoAFN afn_repetir(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento)
+{
+    FragmentoAFN resultado;
+
+    resultado.inicial = afn_novo_estado(a);
+    resultado.final = afn_novo_estado(a);
+
+    /* Permite iniciar o fragmento ou aceitar zero repeticoes. */
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        fragmento.inicial,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        resultado.final,
+        1,
+        NULL);
+
+    /* Permite repetir o fragmento ou finalizar. */
+    afn_adicionar_transicao(
+        a,
+        fragmento.final,
+        fragmento.inicial,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        fragmento.final,
+        resultado.final,
+        1,
+        NULL);
+
+    return resultado;
+}
+
+/* Permite uma ou mais repeticoes de um fragmento (+). */
+static FragmentoAFN afn_mais(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento)
+{
+    FragmentoAFN resultado;
+
+    resultado.inicial = afn_novo_estado(a);
+    resultado.final = afn_novo_estado(a);
+
+    /* A primeira passagem pelo fragmento e obrigatoria. */
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        fragmento.inicial,
+        1,
+        NULL);
+
+    /* Depois da primeira passagem, pode repetir ou finalizar. */
+    afn_adicionar_transicao(
+        a,
+        fragmento.final,
+        fragmento.inicial,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        fragmento.final,
+        resultado.final,
+        1,
+        NULL);
+
+    return resultado;
+}
+
+/* Permite zero ou uma ocorrencia de um fragmento (?). */
+static FragmentoAFN afn_opcional(
+    AutomatoAFN *a,
+    FragmentoAFN fragmento)
+{
+    FragmentoAFN resultado;
+
+    resultado.inicial = afn_novo_estado(a);
+    resultado.final = afn_novo_estado(a);
+
+    /* Permite escolher entre percorrer ou pular o fragmento. */
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        fragmento.inicial,
+        1,
+        NULL);
+
+    afn_adicionar_transicao(
+        a,
+        resultado.inicial,
+        resultado.final,
+        1,
+        NULL);
+
+    /* O fragmento leva ao estado final. */
+    afn_adicionar_transicao(
+        a,
+        fragmento.final,
+        resultado.final,
+        1,
+        NULL);
+
+    return resultado;
+}
+
 /* Emite uma linha indentada; fmt segue printf. */
 static void emit(Emissor *em, const char *fmt, ...)
 {
@@ -270,41 +1170,100 @@ static void emit_erro(Emissor *em, const Bitset *esperados)
 /* Traducao das expressoes (esquema da secao 4 do enunciado)          */
 /* ------------------------------------------------------------------ */
 
+
 static void gen_expr(Emissor *em, const Gramatica *g, const Expr *e)
 {
+    int i;
+    int abriu;
+    int anulavel;
 
     switch (e->tipo) {
     case E_TERM:
         emit(em, "match(%s);", g->terms[e->simbolo].nome_c);
         break;
+
     case E_NAOTERM:
         emit(em, "parse_%s();", g->nts[e->simbolo].nome);
         break;
-    /*
-     * TODO(aluno): traduzir as demais construcoes (secao 4):
-     *
-     *   E_SEQ   a1 a2 ... an   ->  gen_expr de cada filho, em ordem
-     *   E_ALT   a1 | ... | an  ->  if (FIRST(a1)) {...} else if ... else erro
-     *   E_OPC   [ a ]          ->  if (FIRST(a)) { ... }
-     *   E_REP   { a }          ->  while (FIRST(a)) { ... }
-     *   E_VAZIO                ->  nada
-     *
-     * Ferramentas disponiveis neste arquivo:
-     *   emit(em, fmt, ...)                 uma linha indentada
-     *   em->nivel++ / em->nivel--          indentacao dos blocos
-     *   emit_teste(em, "if (", g, &x->first, ") {")
-     *   emit_erro(em, &e->first)           erro_sintatico com os esperados
-     * Os conjuntos FIRST de cada no foram calculados em conjuntos.c.
-     * Uma alternativa anulavel nao tem teste: ela fica no else final,
-     * no lugar do erro.
-     */
-    default:
-        emit(em, "/* TODO(aluno): construcao ainda nao traduzida */");
-        (void) emit_teste;
-        (void) emit_erro;
+
+    case E_SEQ:
+        for (i = 0; i < e->nfilhos; i++)
+            gen_expr(em, g, e->filhos[i]);
+        break;
+
+    case E_ALT:
+        abriu = 0;
+        anulavel = -1;
+
+        for (i = 0; i < e->nfilhos; i++) {
+            const Expr *filho = e->filhos[i];
+
+            if (filho->anulavel)
+                anulavel = i;
+
+            if (bitset_tamanho(&filho->first) > 0) {
+                emit_teste(em,
+                    abriu ? "} else if (" : "if (",
+                    g, &filho->first, ") {");
+
+                em->nivel++;
+                gen_expr(em, g, filho);
+                em->nivel--;
+
+                abriu = 1;
+            }
+        }
+
+        if (anulavel >= 0) {
+            if (abriu) {
+                emit(em, "} else {");
+                em->nivel++;
+            }
+
+            gen_expr(em, g, e->filhos[anulavel]);
+
+            if (abriu) {
+                em->nivel--;
+                emit(em, "}");
+            }
+        } else if (abriu) {
+            emit(em, "} else {");
+            em->nivel++;
+            emit_erro(em, &e->first);
+            em->nivel--;
+            emit(em, "}");
+        } else {
+            emit_erro(em, &e->first);
+        }
+        break;
+
+    case E_OPC:
+        if (e->nfilhos > 0) {
+            emit_teste(em, "if (", g,
+                       &e->filhos[0]->first, ") {");
+            em->nivel++;
+            gen_expr(em, g, e->filhos[0]);
+            em->nivel--;
+            emit(em, "}");
+        }
+        break;
+
+    case E_REP:
+        if (e->nfilhos > 0) {
+            emit_teste(em, "while (", g,
+                       &e->filhos[0]->first, ") {");
+            em->nivel++;
+            gen_expr(em, g, e->filhos[0]);
+            em->nivel--;
+            emit(em, "}");
+        }
+        break;
+
+    case E_VAZIO:
         break;
     }
 }
+
 
 /* ------------------------------------------------------------------ */
 /* Expressoes regulares de TOKENS (modo proprio)                      */
@@ -315,22 +1274,44 @@ static void gen_expr(Emissor *em, const Gramatica *g, const Expr *e)
  * que devolve o comprimento do MAIOR prefixo de s reconhecido pela
  * expressao regular, ou 0 se nenhum prefixo for reconhecido.
  * Retorna 0 se a expressao for valida (senao reporte com diag_erro). */
-static int gen_casamento_regex(FILE *f, const char *nome, const char *regex)
+static int gen_casamento_regex(
+    FILE *f,
+    const char *nome,
+    const char *regex)
 {
-    /* TODO(aluno): converter a expressao regular em automato finito
-     * deterministico (por exemplo: analisar a expressao, construir o AFN
-     * de Thompson e determiniza-lo pela construcao de subconjuntos) e
-     * emitir o automato como codigo C: um switch sobre o estado, com as
-     * transicoes por faixas de caracteres, guardando a ultima posicao em
-     * que o automato passou por um estado final. Subconjunto minimo:
-     * concatenacao, |, *, +, ?, parenteses, classes [a-z] e [^...], o
-     * ponto e escapes como \n, \t, \\ e \/.
-     *
-     * O stub abaixo nao reconhece nada. */
-    fprintf(f, "static size_t %s(const char *s)\n{\n", nome);
-    fputs("    /* TODO(aluno): automato para ", f);
-    emitir_comentario(f, regex);
-    fputs(" */\n    (void) s;\n    return 0;\n}\n\n", f);
+    AutomatoAFN automato;
+    ParserRegex parser;
+    FragmentoAFN resultado;
+
+    afn_iniciar(&automato);
+
+    parser.texto = regex;
+    parser.posicao = 0;
+    parser.automato = &automato;
+    parser.erro = 0;
+
+    resultado = regex_parse_expr(&parser);
+
+    if (parser.erro || !regex_fim(&parser)) {
+        afn_liberar(&automato);
+        return -1;
+    }
+
+    automato.inicial = resultado.inicial;
+    automato.final = resultado.final;
+
+    fprintf(f,
+        "static size_t %s(const char *s)\n"
+        "{\n",
+        nome);
+
+    afn_emitir_transicoes(f, &automato);
+    afn_emitir_simulador(f, &automato);
+
+    fputs("}\n\n", f);
+
+    afn_liberar(&automato);
+
     return 0;
 }
 
@@ -345,26 +1326,77 @@ static int gen_casamento_regex(FILE *f, const char *nome, const char *regex)
  *   Token: tipo = <numero>, lexema = '<texto>', linha = <numero>
  *
  * Ao chegar ao fim do arquivo devolve um token TOKEN_FIM. */
+
 static void gen_token_de_arquivo(FILE *f, int microc)
 {
-    /* TODO(aluno): emitir a leitura real com fgets + sscanf (formato
-     * acima). Linhas em branco sao ignoradas; uma linha malformada deve
-     * ser reportada com o numero da linha do arquivo de tokens. */
-    static const char *const linhas[] = {
+    static const char *const inicio[] = {
         "static Token token_de_arquivo(void)",
         "{",
         "    Token t;",
+        "    char buffer[512];",
+        "    char lexema[100];",
+        "    char *p;",
+        "    char *abre;",
+        "    char *fecha;",
+        "    int tipo;",
+        "    int linha;",
+        "    int numero_linha = 0;",
+        "    int lidos;",
         "    memset(&t, 0, sizeof t);",
-        "    fprintf(stderr, \"opcao --tokens ainda nao implementada\\n\");",
-        "    exit(EXIT_FAILURE);",
+        "    while (fgets(buffer, sizeof buffer, arquivo_tokens) != NULL) {",
+        "        numero_linha++;",
+        "        p = buffer;",
+        "        while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n')",
+        "            p++;",
+        "        if (*p == '\\0')",
+        "            continue;",
+        "        abre = strstr(p, \"lexema = '\");",
+        "        if (abre == NULL) goto erro_token;",
+        "        abre += strlen(\"lexema = '\");",
+        "        fecha = strchr(abre, '\\'');",
+        "        if (fecha == NULL) goto erro_token;",
+        "        if ((size_t)(fecha - abre) >= sizeof lexema) goto erro_token;",
+        "        memcpy(lexema, abre, (size_t)(fecha - abre));",
+        "        lexema[fecha - abre] = '\\0';",
+        "        lidos = sscanf(p, \"Token: tipo = %d,\", &tipo);",
+        "        if (lidos != 1) goto erro_token;",
+        "        lidos = sscanf(fecha + 1, \", linha = %d\", &linha);",
+        "        if (lidos != 1) goto erro_token;",
+        "        t.tipo = tipo;",
+        "        strcpy(t.lexema, lexema);",
+        "        t.linha = linha;",
+        NULL
+    };
+    static const char *const final_normal[] = {
+        "        t.coluna = 0;",
+        "        return t;",
+        "erro_token:",
+        "        fprintf(stderr, \"arquivo de tokens: linha %d: formato invalido\\n\", numero_linha);",
+        "        exit(EXIT_FAILURE);",
+        "    }",
+        "    t.tipo = TOKEN_FIM;",
         "    return t;",
         "}",
         "",
         NULL
     };
-    (void) microc;
-    emit_linhas(f, linhas);
+    static const char *const final_microc[] = {
+        "        return t;",
+        "erro_token:",
+        "        fprintf(stderr, \"arquivo de tokens: linha %d: formato invalido\\n\", numero_linha);",
+        "        exit(EXIT_FAILURE);",
+        "    }",
+        "    t.tipo = TOKEN_FIM;",
+        "    return t;",
+        "}",
+        "",
+        NULL
+    };
+
+    emit_linhas(f, inicio);
+    emit_linhas(f, microc ? final_microc : final_normal);
 }
+
 
 /* ------------------------------------------------------------------ */
 /* Partes fixas do codigo gerado                                      */

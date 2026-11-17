@@ -24,16 +24,26 @@ extern FILE *microc_yyin;
 extern char *microc_yytext;
 extern int   linha_atual;
 extern int   microc_yylex_destroy(void);
+extern int linha_token;
+extern void microc_liberar_symbol(void);
 
 /* Texto a guardar em Token.lexema para o token que microc_yylex acabou
  * de devolver. */
 static const char *texto_do_lexema(int tipo)
 {
-    /* TODO(aluno): para ID, INTEGERCONST, CHARCONST e STRINGCONST, devolva
-     * o texto do Symbol em microc_yylval.symbol; para UNDEF, devolva
-     * microc_yylval.error_msg. */
-    (void) tipo;
-    return microc_yytext;
+    switch (tipo) {
+    case ID:
+    case INTEGERCONST:
+    case CHARCONST:
+    case STRINGCONST:
+        return microc_yylval.symbol;
+
+    case UNDEF:
+        return microc_yylval.error_msg;
+
+    default:
+        return microc_yytext;
+    }
 }
 
 /* O TP1 permite que tokens de um caractere sejam devolvidos pelo proprio
@@ -71,6 +81,7 @@ void scanner_iniciar(FILE *entrada)
 {
     microc_yyin = entrada;
     linha_atual = 1;
+    linha_token = 1;
 }
 
 Token proximo_token(void)
@@ -84,17 +95,24 @@ Token proximo_token(void)
     /* Observacao: o flex devolve 0 no fim da entrada, mas 0 e UNDEF no
      * tokens.h. O TP1 deve devolver END_OF_FILE na regra <<EOF>>. */
     t.tipo = normalizar(tipo);
-    t.linha = linha_atual;
+    t.linha = linha_token;
     texto = t.tipo == END_OF_FILE ? "" : texto_do_lexema(tipo);
     if (texto != NULL) {
         strncpy(t.lexema, texto, sizeof t.lexema - 1);
         t.lexema[sizeof t.lexema - 1] = '\0';
+    }
+
+    if (tipo == ID ||
+        tipo == INTEGERCONST ||
+        tipo == CHARCONST ||
+        tipo == STRINGCONST)
+    {
+        microc_liberar_symbol();
     }
     return t;
 }
 
 void scanner_finalizar(void)
 {
-    /* TODO(aluno): liberar tambem a tabela de strings do TP1. */
     microc_yylex_destroy();
 }
